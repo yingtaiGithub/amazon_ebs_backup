@@ -1,17 +1,13 @@
 import os
 import sys
 import time
+import logging
 from datetime import datetime, timedelta
 
 import boto3
 
 import config
 
-
-def get_ec_ids():
-    ec2 = boto3.client('ec2', 'eu-central-1')
-    response = ec2.describe_instances()
-    print (response)
 
 def create_keypair():
     response = ec2_client.create_key_pair(KeyName=config.KEY_NAME)
@@ -71,6 +67,10 @@ def attach_snapshots(instance_id, SnapshotId_VolumeId):
 
 
 def rsync(instance_id, devices_VolumnId):
+    result = {'Mount':{}, 'Rsync':{}}
+
+    if not os.path.exists("datastore"):
+        os.mkdir('datastore')
     instance = ec2_resource.Instance(instance_id)
     public_dns_name = instance.public_dns_name
     # print (public_dns_name)
@@ -81,20 +81,44 @@ def rsync(instance_id, devices_VolumnId):
         print (e)
 
     for device, volumeId in devices_VolumnId:
-        print('Mounting the device %s to the %s' % (device, volumeId))
+        logging.info('\n\nMounting and RSYNC for %s' % (volumeId))
         try:
             os.system("ssh -o StrictHostKeyChecking=no -i {0} ubuntu@{1} \"sudo mkdir /mnt/datastore/{2}\"".format(
                 config.KEY_NAME + ".pem", public_dns_name, volumeId))
         except Exception as e:
             print (e)
-        try:
-            os.system("ssh -o StrictHostKeyChecking=no -i {0} ubuntu@{1} \"sudo mount {2} /mnt/datastore/{3}\"".format(
-                config.KEY_NAME + ".pem", public_dns_name, device.replace("sd", "xvd")+"1", volumeId))
-        except Exception as e:
-            print (e)
 
-    print ("Starting Rsync from %s:/mnt/datastore to the current directory" %public_dns_name)
-    os.system("rsync --delete -azvv -e \"ssh -i {0}\" ubuntu@{1}:/mnt/datastore .".format(config.KEY_NAME + ".pem", public_dns_name))
+        r = os.system("ssh -o StrictHostKeyChecking=no -i {0} ubuntu@{1} \"sudo mount {2} /mnt/datastore/{3}\"".format(
+            config.KEY_NAME + ".pem", public_dns_name, device.replace("sd", "xvd")+"1", volumeId))
+        if r != 0:
+            r = os.system("ssh -o StrictHostKeyChecking=no -i {0} ubuntu@{1} \"sudo mount {2} /mnt/datastore/{3}\"".format(
+                config.KEY_NAME + ".pem", public_dns_name, device.replace("sd", "xvd"), volumeId))
+            if r != 0:
+                logging.error('Mounting: Fail')
+                result['Mount'][volumeId] = "Fail"
+                continue
+            else:
+                logging.info('Mounting: Success')
+                result['Mount'][volumeId] = "Success"
+        else:
+            logging.info('Mounting: Success')
+            result['Mount'][volumeId] = "Success"
+
+        # RSYNC
+        dest = 'datastore/%s' % volumeId
+        print ("Starting Rsync from %s:/mnt/datastore/%s to %s" %(public_dns_name, volumeId, dest))
+        if not os.path.exists(dest):
+            os.mkdir(dest)
+        os.system("ssh -o StrictHostKeyChecking=no -i {0} ubuntu@{1} \"sudo chmod -R 777 /mnt/datastore/{2}\"".format(
+            config.KEY_NAME + ".pem", public_dns_name, volumeId))
+        r = os.system("rsync --delete -azvv -e \"ssh -i {0}\" ubuntu@{1}:/mnt/datastore/{2}/ {3}".format(config.KEY_NAME + ".pem", public_dns_name, volumeId, dest))
+        if r == 0:
+            logging.info("RSYNC of %s: Success" %volumeId)
+            result['Rsync'][volumeId] = "Success"
+        else:
+            result['Rsync'][volumeId] = "Fail"
+
+    return result
 
 
 def delete_instance(instance_id):
@@ -127,7 +151,7 @@ def delete_instance(instance_id):
 
 def delete_mySnapshots():
     print ("Current Time:",  datetime.utcnow(), "\n")
-    delete_time = datetime.utcnow() - timedelta(seconds=config.DURING_DAYS)
+    delete_time = datetime.utcnow() - timedelta(days=config.DURING_DAYS)
     deletion_counter = 0
     size_counter = 0
 
@@ -146,6 +170,7 @@ def delete_mySnapshots():
 
     print ('Deleted {number} snapshots totalling {size} GB'.format(number=deletion_counter,size=size_counter))
 
+
 def main():
     #----- 1.***** create snapshots of the instances.
     print ("\n\n****** 1. Creating the snapshots of the instances")
@@ -162,10 +187,10 @@ def main():
     devices_SnapshotId = attach_snapshots(instance_id, SnapshotId_VolumeId)
     print ("devices_SnapshotId", devices_SnapshotId)
 
-    # #----4. rsnync from temporary instance to local
-    # print("\n\n****** 4. rsnync from temporary instance to local. Source: /mnt/datastore, dest: current directory")
-    # devices_VolumnId = {(key, SnapshotId_VolumeId[value]) for key, value in devices_SnapshotId.items()}
-    # rsync(instance_id, devices_VolumnId)
+    #----4. rsnync from temporary instance to local
+    print("\n\n****** 4. rsnync from temporary instance to local. Source: /mnt/datastore, dest: current directory")
+    devices_VolumnId = {(key, SnapshotId_VolumeId[value]) for key, value in devices_SnapshotId.items()}
+    result = rsync(instance_id, devices_VolumnId)
 
     # ----5. delete the temporary instance.
     print("\n\n***** 5. Deleting the temorary instance. Instance Id: %s \n\n" % instance_id)
@@ -175,13 +200,40 @@ def main():
     print ("\n\n***** 6. Deleting the snapshorts created by this script older than 5 days ")
     delete_mySnapshots()
 
+    # -----final: Result ---------
+    print ("\n\n***** RESULT *****\n")
+    print ("-- Mount --")
+    print (key+": " + value + "\n" for key, value in result['Mount'])
+    print ("-- Rsync --")
+    print(key + ": " + value + "\n" for key, value in result['Rsync'])
 
 def partial():
-    instance_id = 'i-0a433e116f5fcffb1'
-    delete_instance(instance_id)
-    delete_mySnapshots()
+    pass
+
+    # instance_id = 'i-059684d94ee89ddb8'
+    # delete_instance(instance_id)
+    # delete_mySnapshots()
+
+    # instance = ec2_resource.Instance(instance_id)
+    # print (instance.block_device_mappings)
+
+    # public_dns_name = "ec2-18-195-32-63.eu-central-1.compute.amazonaws.com"
+    # r = os.system("ssh -o StrictHostKeyChecking=no -i {0} ubuntu@{1} \"sudo mount {2} {3}\"".format(
+    #     config.KEY_NAME + ".pem", public_dns_name, '/dev/xvde1', '/mnt/test'))
+    # print (type(r))
+
+
+    # os.system("ssh -o StrictHostKeyChecking=no -i {0} ubuntu@{1} \"sudo chmod -R 777 /mnt/{2}\"".format(
+    #     config.KEY_NAME + ".pem", public_dns_name, 'test'))
+    # r = os.system(
+    #     "rsync --delete -azvv -e \"ssh -i {0}\" ubuntu@{1}:/mnt/{2}/ {3}".format(config.KEY_NAME + ".pem",
+    #                                                                             public_dns_name,
+    #                                                                             'test',
+    #                                                                             'datastore/test'))
+    # print (r)
 
 if __name__ == "__main__":
+    logging.basicConfig(filename=".log", level=logging.INFO)
     # ec2_ids = ['i-08ae6debac9aa04d7', 'i-06b3453c3b7b31012']
     ec2_client = boto3.client('ec2', config.REGION)
     ec2_resource = boto3.resource('ec2', config.REGION)
