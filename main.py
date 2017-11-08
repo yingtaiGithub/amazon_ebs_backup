@@ -203,9 +203,9 @@ def main():
     # -----final: Result ---------
     print ("\n\n***** RESULT *****\n")
     print ("-- Mount --")
-    print (key+": " + value + "\n" for key, value in result['Mount'])
+    print ("\n".join([key+": " + value for key, value in result['Mount'].items()]))
     print ("-- Rsync --")
-    print(key + ": " + value + "\n" for key, value in result['Rsync'])
+    print("\n".join([key + ": " + value for key, value in result['Rsync'].items()]))
 
 def partial():
     pass
@@ -246,3 +246,6 @@ if __name__ == "__main__":
 
     main()
     # partial()
+    # result = {'Mount': {'0123': 'Fail', '123': 'Success'}, 'Rsync': {'0123': 'Fail', '123': 'Success'}}
+    # print("\n".join([key + ": " + value for key, value in result['Mount'].items()]))
+
